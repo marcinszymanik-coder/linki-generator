@@ -4,38 +4,29 @@ import streamlit as st
 def generate_regex():
     st.set_page_config(page_title="Generator Regex", page_icon="🔍")
     st.title("Generator Regex z linków")
-    
+
     # Wzorzec do wyłuskiwania ID z URL
     id_pattern = re.compile(r'/(\d+)-')
-    
-    # Upload pliku zamiast lokalnego odczytu
+
     uploaded_file = st.file_uploader("Wgraj plik z linkami (np. linki.txt)", type=["txt"])
-    
+
     if uploaded_file is not None:
-        ids = set()
-        
-        # Odczyt pliku w pamięci
-        content = uploaded_file.getvalue().decode("utf-8").splitlines()
-        
-        for line in content:
-            match = id_pattern.search(line)
-            if match:
-                ids.add(match.group(1))
-                
+        # utf-8-sig usuwa ewentualny BOM; errors="ignore" chroni przed błędami kodowania
+        content = uploaded_file.getvalue().decode("utf-8-sig", errors="ignore")
+
+        # findall na całym tekście – działa dla tabulatorów, spacji i nowych linii
+        ids = set(id_pattern.findall(content))
+
         if not ids:
             st.warning("Nie znaleziono żadnych ID w podanym pliku.")
             return
 
-        # Sortowanie ID i generowanie regexa
-        sorted_ids = sorted(list(ids), key=int)
+        sorted_ids = sorted(ids, key=int)
         regex_string = f".*/({'|'.join(sorted_ids)})-.*"
-        
-        st.success("Wygenerowano regex!")
-        
-        # Wyświetlenie wyniku na ekranie
+
+        st.success(f"Wygenerowano regex! Znalezione ID: {len(sorted_ids)}")
         st.code(regex_string, language="regex")
-        
-        # Przycisk do pobrania wyniku
+
         st.download_button(
             label="Pobierz jako regex.txt",
             data=regex_string,
