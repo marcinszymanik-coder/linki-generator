@@ -54,14 +54,8 @@ def generate_regex():
     with tab2:
         st.header("Ekstrakcja ze zrzutu ekranu")
         
-        # Konfiguracja ścieżki do Tesseracta
-        tesseract_path = st.text_input(
-            "Ścieżka do Tesseracta (dla Streamlit Cloud to: /usr/bin/tesseract, dla Mac M1/M2 to: /opt/homebrew/bin/tesseract):", 
-            value='/usr/bin/tesseract'
-        )
-
-        if tesseract_path:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        # Sztywno przypisana ścieżka dla Streamlit Cloud (ukryta przed użytkownikiem)
+        pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
         uploaded_file_img = st.file_uploader("Wybierz plik ze zrzutem ekranu", type=['png', 'jpg', 'jpeg'])
 
