@@ -1,3 +1,5 @@
 streamlit
 pytesseract
 Pillow
+requests
+beautifulsoup4
