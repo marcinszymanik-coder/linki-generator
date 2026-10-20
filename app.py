@@ -11,12 +11,15 @@ def generate_regex():
     st.set_page_config(page_title="Generator Regex & Ekstraktor Linków", page_icon="🔍")
     st.title("Narzędzia SEO & Regex")
 
-    # Tworzenie zakładek dla trzech metod
-    tab1, tab2, tab3 = st.tabs(["Z pliku tekstowego (.txt)", "Ze zrzutu ekranu (OCR)", "Z wyszukiwarki (Linki)"])
+    # Tworzenie zakładek dla 4 metod
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Z pliku tekstowego (.txt)", 
+        "Ze zrzutu ekranu (OCR)", 
+        "Z wyszukiwarki", 
+        "Zbiorcze z podstron (IRBJ)"
+    ])
 
-    # Wzorce do wyłuskiwania ID
     id_pattern_txt = re.compile(r'/(\d+)-')
-    # Wzorzec dla OCR uwzględnia ewentualne spacje, które Tesseract może dodać przez pomyłkę
     id_pattern_ocr = r'/\s*(\d+)\s*-'
 
     # ==========================================
@@ -53,7 +56,6 @@ def generate_regex():
     with tab2:
         st.header("Ekstrakcja ID ze zrzutu ekranu")
         
-        # Sztywno przypisana ścieżka dla Streamlit Cloud
         pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
         uploaded_file_img = st.file_uploader("Wybierz plik ze zrzutem ekranu", type=['png', 'jpg', 'jpeg'])
@@ -105,17 +107,14 @@ def generate_regex():
             value="szybkie-i-latwe-planowanie-systemow\n/logowanie\n/rejestracja\n/kontakt\n/regulamin\n/polityka-prywatnosci"
         )
 
-        if st.button("Skanuj i pobierz linki", type="primary"):
+        if st.button("Skanuj z wyszukiwarki", type="primary", key="btn_wyszukiwarka"):
             if not search_url:
                 st.warning("Proszę podać link do przeskanowania.")
             else:
-                # Przygotowanie listy odrzucanych fraz
                 odrzucane_frazy = [fraza.strip() for fraza in odrzucane_input.split('\n') if fraza.strip()]
                 
                 with st.spinner("Pobieranie i analizowanie wyników..."):
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    }
+                    headers = {'User-Agent': 'Mozilla/5.0'}
                     try:
                         response = requests.get(search_url, headers=headers, timeout=10)
                         
@@ -129,30 +128,19 @@ def generate_regex():
                                 full_url = urljoin(search_url, href)
                                 parsed = urlparse(full_url)
                                 
-                                # Sprawdzanie domeny i oczyszczanie URL
                                 if parsed.netloc == domena_bazowa:
                                     clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', '', ''))
                                     
-                                    # Szukanie cyfry w samej ścieżce (np. ID artykułu)
                                     if re.search(r'\d+', parsed.path):
-                                        # Sprawdzanie z czarną listą
                                         if not any(fraza in clean_url for fraza in odrzucane_frazy):
                                             znalezione_linki.add(clean_url)
                             
                             if znalezione_linki:
                                 posortowane_linki = sorted(znalezione_linki)
                                 st.success(f"Gotowe! Znaleziono {len(posortowane_linki)} pożądanych linków.")
-                                
                                 formatowane_linki = "\n".join(posortowane_linki)
                                 st.code(formatowane_linki, language="text")
-                                
-                                st.download_button(
-                                    label="Pobierz listę linków jako plik .txt",
-                                    data=formatowane_linki,
-                                    file_name="wyciagniete_linki.txt",
-                                    mime="text/plain",
-                                    key="download_links"
-                                )
+                                st.download_button("Pobierz listę", formatowane_linki, "wyszukiwarka_linki.txt", "text/plain", key="down_wyszukiwarka")
                             else:
                                 st.warning("Nie znaleziono linków spełniających podane kryteria.")
                         else:
@@ -160,6 +148,64 @@ def generate_regex():
                             
                     except requests.exceptions.RequestException as e:
                         st.error(f"Wystąpił błąd sieciowy podczas łączenia: {e}")
+
+    # ==========================================
+    # ZAKŁADKA 4: Zbiorcze z podstron (IRBJ)
+    # ==========================================
+    with tab4:
+        st.header("Wyciąganie linków z podstron z filtrem kategorii")
+        
+        st.markdown("Wklej całą grupę adresów URL (mogą być oddzielone spacją, enterem lub innym tekstem). Skrypt wyciągnie tylko linki z cyframi (np. artykuły).")
+        urls_input_irbj = st.text_area("Lista linków startowych do przeskanowania:", height=150)
+        
+        phrases_input_irbj = st.text_area(
+            "Szukane kategorie/frazy (każda w nowej linii, link musi zawierać minimum jedną):",
+            value="irbj/porady\nirbj/nowosci\nirbj/aktualnosci\nirbj/filmy\nirbj/promocje"
+        )
+        
+        if st.button("Skanuj podstrony", type="primary", key="btn_irbj"):
+            start_urls = list(set(re.findall(r'https?://[^\s,;\"\'<>]+', urls_input_irbj)))
+            
+            if not start_urls:
+                st.warning("Nie znaleziono żadnych poprawnych linków startowych w podanym tekście.")
+            else:
+                szukane_frazy = [fraza.strip() for fraza in phrases_input_irbj.split('\n') if fraza.strip()]
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                znalezione_linki_irbj = set()
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total_urls = len(start_urls)
+                
+                for i, url in enumerate(start_urls):
+                    status_text.text(f"Skanowanie ({i+1}/{total_urls}): {url}")
+                    try:
+                        response = requests.get(url, headers=headers, timeout=10)
+                        if response.status_code == 200:
+                            soup = BeautifulSoup(response.text, 'html.parser')
+                            for a_tag in soup.find_all('a', href=True):
+                                href = a_tag['href']
+                                if any(fraza in href for fraza in szukane_frazy):
+                                    if re.search(r'\d+', href):
+                                        full_url = urljoin(url, href)
+                                        parsed = urlparse(full_url)
+                                        clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', '', ''))
+                                        znalezione_linki_irbj.add(clean_url)
+                    except Exception as e:
+                        st.toast(f"Wystąpił błąd podczas łączenia z {url}: {e}")
+                    
+                    progress_bar.progress((i + 1) / total_urls)
+                
+                status_text.text("Skanowanie zakończone!")
+                
+                if znalezione_linki_irbj:
+                    posortowane_linki = sorted(znalezione_linki_irbj)
+                    st.success(f"Gotowe. Znaleziono łącznie unikalnych linków: {len(posortowane_linki)}")
+                    formatowane_linki = "\n".join(posortowane_linki)
+                    st.code(formatowane_linki, language="text")
+                    st.download_button("Pobierz listę", formatowane_linki, "podstrony_linki.txt", "text/plain", key="down_irbj")
+                else:
+                    st.info("Nie znaleziono linków spełniających podane kryteria.")
 
 if __name__ == "__main__":
     generate_regex()
