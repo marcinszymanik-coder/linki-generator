@@ -7,16 +7,16 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urlunparse
 
 def generate_regex():
-    # Ustawienia strony
-    st.set_page_config(page_title="Generator Regex & Ekstraktor Linków", page_icon="🔍")
+    st.set_page_config(page_title="Generator Regex & Ekstraktor Linków", page_icon="🔍", layout="wide")
     st.title("Narzędzia SEO & Regex")
 
-    # Tworzenie zakładek dla 4 metod
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # Tworzenie zakładek dla 5 metod
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Z pliku tekstowego (.txt)", 
         "Ze zrzutu ekranu (OCR)", 
         "Z wyszukiwarki", 
-        "Zbiorcze z podstron (IRBJ)"
+        "Zbiorcze z podstron (IRBJ)",
+        "Kategorie z profilu firmy"
     ])
 
     id_pattern_txt = re.compile(r'/(\d+)-')
@@ -206,6 +206,58 @@ def generate_regex():
                     st.download_button("Pobierz listę", formatowane_linki, "podstrony_linki.txt", "text/plain", key="down_irbj")
                 else:
                     st.info("Nie znaleziono linków spełniających podane kryteria.")
+
+    # ==========================================
+    # ZAKŁADKA 5: Kategorie z profilu firmy
+    # ==========================================
+    with tab5:
+        st.header("Wyciąganie fragmentów kategorii firm")
+        
+        st.markdown("Wklej link(i) do profilu firmy (np. `https://automatykab2b.pl/firmy/827-amtek`). Skrypt wyodrębni przypisane do niej kategorie, zwracając sam fragment po `/firmy/`.")
+        urls_input_kategorie = st.text_area("Linki do profilu firm:", placeholder="https://automatykab2b.pl/firmy/827-amtek\n...", height=100)
+        
+        if st.button("Wyciągnij kategorie", type="primary", key="btn_kategorie"):
+            start_urls = list(set(re.findall(r'https?://[^\s,;\"\'<>]+', urls_input_kategorie)))
+            
+            if not start_urls:
+                st.warning("Proszę podać przynajmniej jeden link.")
+            else:
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                znalezione_fragmenty = set()
+                
+                with st.spinner("Pobieranie i analizowanie stron..."):
+                    for url in start_urls:
+                        try:
+                            response = requests.get(url, headers=headers, timeout=10)
+                            if response.status_code == 200:
+                                soup = BeautifulSoup(response.text, 'html.parser')
+                                domena_bazowa = urlparse(url).netloc
+                                
+                                for a_tag in soup.find_all('a', href=True):
+                                    href = a_tag['href']
+                                    full_url = urljoin(url, href)
+                                    parsed = urlparse(full_url)
+                                    
+                                    # Szukamy linków na tej samej domenie zaczynających się od /firmy/
+                                    if parsed.netloc == domena_bazowa and parsed.path.startswith('/firmy/'):
+                                        # Wycinamy /firmy/ z przodu
+                                        fragment = parsed.path.replace('/firmy/', '', 1).strip('/')
+                                        
+                                        # Zabezpieczenie przed pustymi, głównym linkiem do /szukaj oraz INNYMI firmami
+                                        # Zazwyczaj ID firmy to cyfry i myślnik na początku, np. "827-amtek"
+                                        if fragment and fragment != 'szukaj' and not re.match(r'^\d+-', fragment):
+                                            znalezione_fragmenty.add(fragment)
+                        except Exception as e:
+                            st.toast(f"Błąd podczas analizy {url}: {e}")
+                
+                if znalezione_fragmenty:
+                    posortowane_fragmenty = sorted(znalezione_fragmenty)
+                    st.success(f"Sukces! Wyciągnięto {len(posortowane_fragmenty)} unikalnych kategorii.")
+                    formatowane_fragmenty = "\n".join(posortowane_fragmenty)
+                    st.code(formatowane_fragmenty, language="text")
+                    st.download_button("Pobierz fragmenty", formatowane_fragmenty, "kategorie_firmy.txt", "text/plain", key="down_kat")
+                else:
+                    st.info("Nie znaleziono kategorii przypisanych do podanego profilu firmy.")
 
 if __name__ == "__main__":
     generate_regex()
