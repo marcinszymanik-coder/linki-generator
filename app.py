@@ -1,262 +1,253 @@
+import os
 import re
+import time
+import socket
+import ipaddress
+
+import requests
 import streamlit as st
 import pytesseract
 from PIL import Image
-import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urlunparse
 
-def generate_regex():
-    st.set_page_config(page_title="Generator Regex & Ekstraktor Linków", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Generator Regex & Ekstraktor Linków", page_icon="🔍", layout="wide")
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+MAX_BYTES = 5 * 1024 * 1024  # limit 5 MB na stronę
+URL_RE = re.compile(r'https?://[^\s,;"\'<>]+')
+
+
+def is_safe_url(url: str) -> bool:
+    """Blokuje adresy lokalne/prywatne (ochrona przed SSRF)."""
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return False
+        for info in socket.getaddrinfo(p.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+@st.cache_resource
+def get_session():
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    return s
+
+
+def fetch_soup(url: str):
+    """Zwraca (soup, None) lub (None, komunikat_błędu)."""
+    if not is_safe_url(url):
+        return None, f"Niedozwolony lub nieosiągalny adres: {url}"
+    try:
+        r = get_session().get(url, timeout=10, stream=True)
+        if r.status_code != 200:
+            return None, f"Błąd HTTP {r.status_code} dla: {url}"
+        content = r.raw.read(MAX_BYTES + 1, decode_content=True)
+        if len(content) > MAX_BYTES:
+            return None, f"Strona zbyt duża: {url}"
+        return BeautifulSoup(content, 'html.parser'), None
+    except requests.exceptions.RequestException as e:
+        return None, f"Błąd sieciowy dla {url}: {e}"
+
+
+def clean(parsed):
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', '', ''))
+
+
+def build_regex(ids):
+    return f".*/({'|'.join(sorted(set(ids), key=int))})-.*"
+
+
+def main():
     st.title("Narzędzia SEO & Regex")
 
-    # Tworzenie zakładek dla 5 metod
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Z pliku tekstowego (.txt)", 
-        "Ze zrzutu ekranu (OCR)", 
-        "Z wyszukiwarki", 
+        "Z pliku tekstowego (.txt)",
+        "Ze zrzutu ekranu (OCR)",
+        "Z wyszukiwarki",
         "Zbiorcze z podstron (IRBJ)",
-        "Kategorie z profilu firmy"
+        "Kategorie z profilu firmy",
     ])
 
     id_pattern_txt = re.compile(r'/(\d+)-')
-    id_pattern_ocr = r'/\s*(\d+)\s*-'
+    id_pattern_ocr = re.compile(r'/\s*(\d+)\s*-')
 
-    # ==========================================
-    # ZAKŁADKA 1: Plik tekstowy (.txt)
-    # ==========================================
+    # --- TAB 1 ---
     with tab1:
         st.header("Ekstrakcja ID z pliku .txt")
-        uploaded_file_txt = st.file_uploader("Wgraj plik z linkami (np. linki.txt)", type=["txt"])
-
-        if uploaded_file_txt is not None:
-            content = uploaded_file_txt.getvalue().decode("utf-8-sig", errors="ignore")
+        f = st.file_uploader("Wgraj plik z linkami (np. linki.txt)", type=["txt"])
+        if f is not None:
+            content = f.getvalue().decode("utf-8-sig", errors="ignore")
             ids = set(id_pattern_txt.findall(content))
-
             if not ids:
                 st.warning("Nie znaleziono żadnych ID w podanym pliku.")
             else:
-                sorted_ids = sorted(ids, key=int)
-                regex_string = f".*/({'|'.join(sorted_ids)})-.*"
+                rx = build_regex(ids)
+                st.success(f"Wygenerowano regex! Unikalne ID: {len(ids)}")
+                st.code(rx, language="regex")
+                st.download_button("Pobierz jako regex.txt", rx, "regex.txt",
+                                   "text/plain", key="download_txt")
 
-                st.success(f"Wygenerowano regex! Znalezione unikalne ID: {len(sorted_ids)}")
-                st.code(regex_string, language="regex")
-
-                st.download_button(
-                    label="Pobierz jako regex.txt",
-                    data=regex_string,
-                    file_name="regex.txt",
-                    mime="text/plain",
-                    key="download_txt"
-                )
-
-    # ==========================================
-    # ZAKŁADKA 2: Zrzut ekranu (OCR)
-    # ==========================================
+    # --- TAB 2 ---
     with tab2:
         st.header("Ekstrakcja ID ze zrzutu ekranu")
-        
-        pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+        if os.path.exists('/usr/bin/tesseract'):
+            pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
-        uploaded_file_img = st.file_uploader("Wybierz plik ze zrzutem ekranu", type=['png', 'jpg', 'jpeg'])
-
-        if uploaded_file_img is not None:
-            img = Image.open(uploaded_file_img)
+        img_file = st.file_uploader("Wybierz plik ze zrzutem ekranu", type=['png', 'jpg', 'jpeg'])
+        if img_file is not None:
+            img = Image.open(img_file)
             st.image(img, caption='Wgrany zrzut ekranu', use_container_width=True)
-            
+
             if st.button("Wyciągnij ID i generuj Regex z obrazka"):
-                with st.spinner('Analizowanie obrazu (OCR)... To może chwilę potrwać.'):
+                with st.spinner('Analizowanie obrazu (OCR)...'):
                     try:
-                        extracted_text = pytesseract.image_to_string(img, config='--psm 6')
-                        found_ids = re.findall(id_pattern_ocr, extracted_text)
-                        
-                        if found_ids:
-                            unique_ids = set(found_ids)
-                            sorted_ids_img = sorted(unique_ids, key=int)
-                            regex_output = f".*/({'|'.join(sorted_ids_img)})-.*"
-                            
-                            st.success(f"Znaleziono {len(sorted_ids_img)} unikalnych ID!")
-                            st.code(regex_output, language='regex')
-                            
-                            st.download_button(
-                                label="Pobierz jako regex_ocr.txt",
-                                data=regex_output,
-                                file_name="regex_ocr.txt",
-                                mime="text/plain",
-                                key="download_ocr"
-                            )
-                            
-                            with st.expander("Pokaż odczytany surowy tekst z obrazka (Debug)"):
-                                st.text(extracted_text)
+                        text = pytesseract.image_to_string(img, config='--psm 6')
+                        found = id_pattern_ocr.findall(text)
+                        if found:
+                            rx = build_regex(found)
+                            st.success(f"Znaleziono {len(set(found))} unikalnych ID!")
+                            st.caption("OCR bywa zawodny – sprawdź ID przed użyciem.")
+                            st.code(rx, language='regex')
+                            st.download_button("Pobierz jako regex_ocr.txt", rx,
+                                               "regex_ocr.txt", "text/plain", key="download_ocr")
+                            with st.expander("Surowy tekst z OCR (debug)"):
+                                st.text(text)
                         else:
                             st.warning("Nie znaleziono żadnych pasujących ID na tym obrazie.")
-                            
                     except Exception as e:
-                        st.error(f"Błąd podczas analizy pliku. Upewnij się, że Tesseract jest prawidłowo zainstalowany. Szczegóły: {e}")
+                        st.error(f"Błąd OCR. Sprawdź instalację Tesseract. Szczegóły: {e}")
 
-    # ==========================================
-    # ZAKŁADKA 3: Z wyszukiwarki (Linki)
-    # ==========================================
+    # --- TAB 3 ---
     with tab3:
         st.header("Ekstrakcja linków z wyszukiwarki")
-        
-        search_url = st.text_input("Podaj link do wyników wyszukiwania:", placeholder="np. https://automatykab2b.pl/szukaj?q=Designer")
-        
-        odrzucane_input = st.text_area(
-            "Czarna lista (wpisz fragmenty, których chcesz unikać, każdy w nowej linii):",
-            value="szybkie-i-latwe-planowanie-systemow\n/logowanie\n/rejestracja\n/kontakt\n/regulamin\n/polityka-prywatnosci"
-        )
+        search_url = st.text_input("Podaj link do wyników wyszukiwania:",
+                                   placeholder="np. https://automatykab2b.pl/szukaj?q=Designer")
+        black = st.text_area(
+            "Czarna lista (każda fraza w nowej linii):",
+            value="szybkie-i-latwe-planowanie-systemow\n/logowanie\n/rejestracja\n/kontakt\n/regulamin\n/polityka-prywatnosci")
 
         if st.button("Skanuj z wyszukiwarki", type="primary", key="btn_wyszukiwarka"):
-            if not search_url:
+            if not search_url.strip():
                 st.warning("Proszę podać link do przeskanowania.")
             else:
-                odrzucane_frazy = [fraza.strip() for fraza in odrzucane_input.split('\n') if fraza.strip()]
-                
+                search_url = search_url.strip()
+                phrases = [x.strip() for x in black.split('\n') if x.strip()]
                 with st.spinner("Pobieranie i analizowanie wyników..."):
-                    headers = {'User-Agent': 'Mozilla/5.0'}
-                    try:
-                        response = requests.get(search_url, headers=headers, timeout=10)
-                        
-                        if response.status_code == 200:
-                            soup = BeautifulSoup(response.text, 'html.parser')
-                            domena_bazowa = urlparse(search_url).netloc
-                            znalezione_linki = set()
-                            
-                            for a_tag in soup.find_all('a', href=True):
-                                href = a_tag['href']
-                                full_url = urljoin(search_url, href)
-                                parsed = urlparse(full_url)
-                                
-                                if parsed.netloc == domena_bazowa:
-                                    clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', '', ''))
-                                    
-                                    if re.search(r'\d+', parsed.path):
-                                        if not any(fraza in clean_url for fraza in odrzucane_frazy):
-                                            znalezione_linki.add(clean_url)
-                            
-                            if znalezione_linki:
-                                posortowane_linki = sorted(znalezione_linki)
-                                st.success(f"Gotowe! Znaleziono {len(posortowane_linki)} pożądanych linków.")
-                                formatowane_linki = "\n".join(posortowane_linki)
-                                st.code(formatowane_linki, language="text")
-                                st.download_button("Pobierz listę", formatowane_linki, "wyszukiwarka_linki.txt", "text/plain", key="down_wyszukiwarka")
-                            else:
-                                st.warning("Nie znaleziono linków spełniających podane kryteria.")
-                        else:
-                            st.error(f"Błąd pobierania strony. Kod HTTP: {response.status_code}")
-                            
-                    except requests.exceptions.RequestException as e:
-                        st.error(f"Wystąpił błąd sieciowy podczas łączenia: {e}")
+                    soup, err = fetch_soup(search_url)
+                if err:
+                    st.error(err)
+                else:
+                    domain = urlparse(search_url).netloc
+                    links = set()
+                    for a in soup.find_all('a', href=True):
+                        p = urlparse(urljoin(search_url, a['href']))
+                        if p.netloc == domain and re.search(r'\d+', p.path):
+                            c = clean(p)
+                            if not any(x in c for x in phrases):
+                                links.add(c)
+                    if links:
+                        out = "\n".join(sorted(links))
+                        st.success(f"Gotowe! Znaleziono {len(links)} linków.")
+                        st.code(out, language="text")
+                        st.download_button("Pobierz listę", out, "wyszukiwarka_linki.txt",
+                                           "text/plain", key="down_wyszukiwarka")
+                    else:
+                        st.warning("Nie znaleziono linków spełniających kryteria.")
 
-    # ==========================================
-    # ZAKŁADKA 4: Zbiorcze z podstron (IRBJ)
-    # ==========================================
+    # --- TAB 4 ---
     with tab4:
         st.header("Wyciąganie linków z podstron z filtrem kategorii")
-        
-        st.markdown("Wklej całą grupę adresów URL (mogą być oddzielone spacją, enterem lub innym tekstem). Skrypt wyciągnie tylko linki z cyframi (np. artykuły).")
-        urls_input_irbj = st.text_area("Lista linków startowych do przeskanowania:", height=150)
-        
-        phrases_input_irbj = st.text_area(
-            "Szukane kategorie/frazy (każda w nowej linii, link musi zawierać minimum jedną):",
-            value="irbj/porady\nirbj/nowosci\nirbj/aktualnosci\nirbj/filmy\nirbj/promocje"
-        )
-        
-        if st.button("Skanuj podstrony", type="primary", key="btn_irbj"):
-            start_urls = list(set(re.findall(r'https?://[^\s,;\"\'<>]+', urls_input_irbj)))
-            
-            if not start_urls:
-                st.warning("Nie znaleziono żadnych poprawnych linków startowych w podanym tekście.")
-            else:
-                szukane_frazy = [fraza.strip() for fraza in phrases_input_irbj.split('\n') if fraza.strip()]
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                znalezione_linki_irbj = set()
-                
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                total_urls = len(start_urls)
-                
-                for i, url in enumerate(start_urls):
-                    status_text.text(f"Skanowanie ({i+1}/{total_urls}): {url}")
-                    try:
-                        response = requests.get(url, headers=headers, timeout=10)
-                        if response.status_code == 200:
-                            soup = BeautifulSoup(response.text, 'html.parser')
-                            for a_tag in soup.find_all('a', href=True):
-                                href = a_tag['href']
-                                if any(fraza in href for fraza in szukane_frazy):
-                                    if re.search(r'\d+', href):
-                                        full_url = urljoin(url, href)
-                                        parsed = urlparse(full_url)
-                                        clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', '', ''))
-                                        znalezione_linki_irbj.add(clean_url)
-                    except Exception as e:
-                        st.toast(f"Wystąpił błąd podczas łączenia z {url}: {e}")
-                    
-                    progress_bar.progress((i + 1) / total_urls)
-                
-                status_text.text("Skanowanie zakończone!")
-                
-                if znalezione_linki_irbj:
-                    posortowane_linki = sorted(znalezione_linki_irbj)
-                    st.success(f"Gotowe. Znaleziono łącznie unikalnych linków: {len(posortowane_linki)}")
-                    formatowane_linki = "\n".join(posortowane_linki)
-                    st.code(formatowane_linki, language="text")
-                    st.download_button("Pobierz listę", formatowane_linki, "podstrony_linki.txt", "text/plain", key="down_irbj")
-                else:
-                    st.info("Nie znaleziono linków spełniających podane kryteria.")
+        st.markdown("Wklej grupę adresów URL (oddzielonych spacją, enterem lub tekstem). "
+                    "Skrypt wyciągnie tylko linki z cyframi.")
+        urls_in = st.text_area("Lista linków startowych:", height=150)
+        phrases_in = st.text_area(
+            "Szukane kategorie/frazy (każda w nowej linii, link musi zawierać min. jedną):",
+            value="irbj/porady\nirbj/nowosci\nirbj/aktualnosci\nirbj/filmy\nirbj/promocje")
 
-    # ==========================================
-    # ZAKŁADKA 5: Kategorie z profilu firmy
-    # ==========================================
+        if st.button("Skanuj podstrony", type="primary", key="btn_irbj"):
+            start_urls = list(dict.fromkeys(URL_RE.findall(urls_in)))
+            if not start_urls:
+                st.warning("Nie znaleziono żadnych poprawnych linków startowych.")
+            else:
+                phrases = [x.strip() for x in phrases_in.split('\n') if x.strip()]
+                found = set()
+                bar = st.progress(0)
+                status = st.empty()
+                for i, url in enumerate(start_urls):
+                    status.text(f"Skanowanie ({i+1}/{len(start_urls)}): {url}")
+                    soup, err = fetch_soup(url)
+                    if err:
+                        st.error(err)
+                    else:
+                        for a in soup.find_all('a', href=True):
+                            p = urlparse(urljoin(url, a['href']))
+                            if p.scheme not in ("http", "https"):
+                                continue
+                            c = clean(p)
+                            if any(x in c for x in phrases) and re.search(r'\d+', p.path):
+                                found.add(c)
+                    bar.progress((i + 1) / len(start_urls))
+                    time.sleep(0.3)
+                status.text("Skanowanie zakończone!")
+
+                if found:
+                    out = "\n".join(sorted(found))
+                    st.success(f"Gotowe. Unikalnych linków: {len(found)}")
+                    st.code(out, language="text")
+                    st.download_button("Pobierz listę", out, "podstrony_linki.txt",
+                                       "text/plain", key="down_irbj")
+                else:
+                    st.info("Nie znaleziono linków spełniających kryteria.")
+
+    # --- TAB 5 ---
     with tab5:
         st.header("Wyciąganie fragmentów kategorii firm")
-        
-        st.markdown("Wklej link(i) do profilu firmy (np. `https://automatykab2b.pl/firmy/827-amtek`). Skrypt wyodrębni przypisane do niej kategorie, zwracając sam fragment po `/firmy/` oddzielony znakiem `|`.")
-        urls_input_kategorie = st.text_area("Linki do profilu firm:", placeholder="https://automatykab2b.pl/firmy/827-amtek\n...", height=100)
-        
+        st.markdown("Wklej link(i) do profilu firmy (np. `https://automatykab2b.pl/firmy/827-amtek`). "
+                    "Zwracam fragment po `/firmy/` oddzielony znakiem `|`.")
+        urls_in = st.text_area("Linki do profilu firm:",
+                               placeholder="https://automatykab2b.pl/firmy/827-amtek\n...", height=100)
+
         if st.button("Wyciągnij kategorie", type="primary", key="btn_kategorie"):
-            start_urls = list(set(re.findall(r'https?://[^\s,;\"\'<>]+', urls_input_kategorie)))
-            
+            start_urls = list(dict.fromkeys(URL_RE.findall(urls_in)))
             if not start_urls:
                 st.warning("Proszę podać przynajmniej jeden link.")
             else:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                znalezione_fragmenty = set()
-                
+                frags = set()
                 with st.spinner("Pobieranie i analizowanie stron..."):
                     for url in start_urls:
-                        try:
-                            response = requests.get(url, headers=headers, timeout=10)
-                            if response.status_code == 200:
-                                soup = BeautifulSoup(response.text, 'html.parser')
-                                domena_bazowa = urlparse(url).netloc
-                                
-                                for a_tag in soup.find_all('a', href=True):
-                                    href = a_tag['href']
-                                    full_url = urljoin(url, href)
-                                    parsed = urlparse(full_url)
-                                    
-                                    if parsed.netloc == domena_bazowa and parsed.path.startswith('/firmy/'):
-                                        fragment = parsed.path.replace('/firmy/', '', 1).strip('/')
-                                        
-                                        if fragment and fragment != 'szukaj' and not re.match(r'^\d+-', fragment):
-                                            znalezione_fragmenty.add(fragment)
-                        except Exception as e:
-                            st.toast(f"Błąd podczas analizy {url}: {e}")
-                
-                if znalezione_fragmenty:
-                    posortowane_fragmenty = sorted(znalezione_fragmenty)
-                    st.success(f"Sukces! Wyciągnięto {len(posortowane_fragmenty)} unikalnych kategorii.")
-                    
-                    # ZMIANA TUTAJ: łączenie elementów za pomocą "|" zamiast nowej linii
-                    formatowane_fragmenty = "|".join(posortowane_fragmenty)
-                    
-                    st.code(formatowane_fragmenty, language="text")
-                    st.download_button("Pobierz fragmenty", formatowane_fragmenty, "kategorie_firmy.txt", "text/plain", key="down_kat")
+                        soup, err = fetch_soup(url)
+                        if err:
+                            st.error(err)
+                            continue
+                        domain = urlparse(url).netloc
+                        for a in soup.find_all('a', href=True):
+                            p = urlparse(urljoin(url, a['href']))
+                            if p.netloc == domain and p.path.startswith('/firmy/'):
+                                frag = p.path[len('/firmy/'):].strip('/')
+                                if frag and frag != 'szukaj' and not re.match(r'^\d+-', frag):
+                                    frags.add(frag)
+                        time.sleep(0.3)
+
+                if frags:
+                    out = "|".join(sorted(frags))
+                    st.success(f"Sukces! Wyciągnięto {len(frags)} unikalnych kategorii.")
+                    st.code(out, language="text")
+                    st.download_button("Pobierz fragmenty", out, "kategorie_firmy.txt",
+                                       "text/plain", key="down_kat")
                 else:
                     st.info("Nie znaleziono kategorii przypisanych do podanego profilu firmy.")
 
+
 if __name__ == "__main__":
-    generate_regex()
+    main()
