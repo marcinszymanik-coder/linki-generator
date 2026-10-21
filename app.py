@@ -213,7 +213,7 @@ def generate_regex():
     with tab5:
         st.header("Wyciąganie fragmentów kategorii firm")
         
-        st.markdown("Wklej link(i) do profilu firmy (np. `https://automatykab2b.pl/firmy/827-amtek`). Skrypt wyodrębni przypisane do niej kategorie, zwracając sam fragment po `/firmy/`.")
+        st.markdown("Wklej link(i) do profilu firmy (np. `https://automatykab2b.pl/firmy/827-amtek`). Skrypt wyodrębni przypisane do niej kategorie, zwracając sam fragment po `/firmy/` oddzielony znakiem `|`.")
         urls_input_kategorie = st.text_area("Linki do profilu firm:", placeholder="https://automatykab2b.pl/firmy/827-amtek\n...", height=100)
         
         if st.button("Wyciągnij kategorie", type="primary", key="btn_kategorie"):
@@ -238,13 +238,9 @@ def generate_regex():
                                     full_url = urljoin(url, href)
                                     parsed = urlparse(full_url)
                                     
-                                    # Szukamy linków na tej samej domenie zaczynających się od /firmy/
                                     if parsed.netloc == domena_bazowa and parsed.path.startswith('/firmy/'):
-                                        # Wycinamy /firmy/ z przodu
                                         fragment = parsed.path.replace('/firmy/', '', 1).strip('/')
                                         
-                                        # Zabezpieczenie przed pustymi, głównym linkiem do /szukaj oraz INNYMI firmami
-                                        # Zazwyczaj ID firmy to cyfry i myślnik na początku, np. "827-amtek"
                                         if fragment and fragment != 'szukaj' and not re.match(r'^\d+-', fragment):
                                             znalezione_fragmenty.add(fragment)
                         except Exception as e:
@@ -253,7 +249,10 @@ def generate_regex():
                 if znalezione_fragmenty:
                     posortowane_fragmenty = sorted(znalezione_fragmenty)
                     st.success(f"Sukces! Wyciągnięto {len(posortowane_fragmenty)} unikalnych kategorii.")
-                    formatowane_fragmenty = "\n".join(posortowane_fragmenty)
+                    
+                    # ZMIANA TUTAJ: łączenie elementów za pomocą "|" zamiast nowej linii
+                    formatowane_fragmenty = "|".join(posortowane_fragmenty)
+                    
                     st.code(formatowane_fragmenty, language="text")
                     st.download_button("Pobierz fragmenty", formatowane_fragmenty, "kategorie_firmy.txt", "text/plain", key="down_kat")
                 else:
