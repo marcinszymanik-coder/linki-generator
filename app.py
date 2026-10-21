@@ -128,42 +128,52 @@ def main():
                     except Exception as e:
                         st.error(f"Błąd OCR. Sprawdź instalację Tesseract. Szczegóły: {e}")
 
-    # --- TAB 3 ---
+        # --- TAB 3 ---
     with tab3:
         st.header("Ekstrakcja linków z wyszukiwarki")
-        search_url = st.text_input("Podaj link do wyników wyszukiwania:",
-                                   placeholder="np. https://automatykab2b.pl/szukaj?q=Designer")
+        search_urls_in = st.text_area(
+            "Podaj link(i) do wyników wyszukiwania (każdy w nowej linii, np. kolejne strony paginacji):",
+            placeholder=("https://automatykab2b.pl/szukaj?q=askom\n"
+                         "https://automatykab2b.pl/szukaj?q=askom&start=20"),
+            height=150)
         black = st.text_area(
             "Czarna lista (każda fraza w nowej linii):",
             value="szybkie-i-latwe-planowanie-systemow\n/logowanie\n/rejestracja\n/kontakt\n/regulamin\n/polityka-prywatnosci")
 
         if st.button("Skanuj z wyszukiwarki", type="primary", key="btn_wyszukiwarka"):
-            if not search_url.strip():
-                st.warning("Proszę podać link do przeskanowania.")
+            search_urls = list(dict.fromkeys(URL_RE.findall(search_urls_in)))
+            if not search_urls:
+                st.warning("Proszę podać przynajmniej jeden link do przeskanowania.")
             else:
-                search_url = search_url.strip()
                 phrases = [x.strip() for x in black.split('\n') if x.strip()]
-                with st.spinner("Pobieranie i analizowanie wyników..."):
-                    soup, err = fetch_soup(search_url)
-                if err:
-                    st.error(err)
-                else:
-                    domain = urlparse(search_url).netloc
-                    links = set()
-                    for a in soup.find_all('a', href=True):
-                        p = urlparse(urljoin(search_url, a['href']))
-                        if p.netloc == domain and re.search(r'\d+', p.path):
-                            c = clean(p)
-                            if not any(x in c for x in phrases):
-                                links.add(c)
-                    if links:
-                        out = "\n".join(sorted(links))
-                        st.success(f"Gotowe! Znaleziono {len(links)} linków.")
-                        st.code(out, language="text")
-                        st.download_button("Pobierz listę", out, "wyszukiwarka_linki.txt",
-                                           "text/plain", key="down_wyszukiwarka")
+                links = set()
+                bar = st.progress(0)
+                status = st.empty()
+                for i, s_url in enumerate(search_urls):
+                    status.text(f"Skanowanie ({i+1}/{len(search_urls)}): {s_url}")
+                    soup, err = fetch_soup(s_url)
+                    if err:
+                        st.error(err)
                     else:
-                        st.warning("Nie znaleziono linków spełniających kryteria.")
+                        domain = urlparse(s_url).netloc
+                        for a in soup.find_all('a', href=True):
+                            p = urlparse(urljoin(s_url, a['href']))
+                            if p.netloc == domain and re.search(r'\d+', p.path):
+                                c = clean(p)
+                                if not any(x in c for x in phrases):
+                                    links.add(c)
+                    bar.progress((i + 1) / len(search_urls))
+                    time.sleep(0.3)
+                status.text("Skanowanie zakończone!")
+
+                if links:
+                    out = "\n".join(sorted(links))
+                    st.success(f"Gotowe! Znaleziono {len(links)} unikalnych linków z {len(search_urls)} stron.")
+                    st.code(out, language="text")
+                    st.download_button("Pobierz listę", out, "wyszukiwarka_linki.txt",
+                                       "text/plain", key="down_wyszukiwarka")
+                else:
+                    st.warning("Nie znaleziono linków spełniających kryteria.")
 
     # --- TAB 4 ---
     with tab4:
