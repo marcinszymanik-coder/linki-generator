@@ -18,6 +18,7 @@ HEADERS = {
                   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 MAX_BYTES = 5 * 1024 * 1024  # limit 5 MB na stronę
+MAX_REDIRECTS = 5
 URL_RE = re.compile(r'https?://[^\s,;"\'<>]+')
 
 
@@ -46,16 +47,33 @@ def get_session():
 
 def fetch_soup(url: str):
     """Zwraca (soup, None) lub (None, komunikat_błędu)."""
-    if not is_safe_url(url):
-        return None, f"Niedozwolony lub nieosiągalny adres: {url}"
+    current = url
     try:
-        r = get_session().get(url, timeout=10, stream=True)
-        if r.status_code != 200:
-            return None, f"Błąd HTTP {r.status_code} dla: {url}"
-        content = r.raw.read(MAX_BYTES + 1, decode_content=True)
-        if len(content) > MAX_BYTES:
-            return None, f"Strona zbyt duża: {url}"
-        return BeautifulSoup(content, 'html.parser'), None
+        for _ in range(MAX_REDIRECTS + 1):
+            if not is_safe_url(current):
+                return None, f"Niedozwolony lub nieosiągalny adres: {current}"
+            r = get_session().get(current, timeout=10, stream=True,
+                                  allow_redirects=False)
+            if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("Location")
+                r.close()
+                if not loc:
+                    return None, f"Przekierowanie bez adresu: {current}"
+                current = urljoin(current, loc)
+                continue
+            if r.status_code != 200:
+                code = r.status_code
+                r.close()
+                return None, f"Błąd HTTP {code} dla: {url}"
+            content = b""
+            for chunk in r.iter_content(chunk_size=65536):
+                content += chunk
+                if len(content) > MAX_BYTES:
+                    r.close()
+                    return None, f"Strona zbyt duża: {url}"
+            r.close()
+            return BeautifulSoup(content, 'html.parser'), None
+        return None, f"Zbyt wiele przekierowań: {url}"
     except requests.exceptions.RequestException as e:
         return None, f"Błąd sieciowy dla {url}: {e}"
 
@@ -85,7 +103,8 @@ def main():
     # --- TAB 1 ---
     with tab1:
         st.header("Ekstrakcja ID z pliku .txt")
-        f = st.file_uploader("Wgraj plik z linkami (np. linki.txt)", type=["txt"])
+        f = st.file_uploader("Wgraj plik z linkami (np. linki.txt)", type=["txt"],
+                             key="txt_upload")
         if f is not None:
             content = f.getvalue().decode("utf-8-sig", errors="ignore")
             ids = set(id_pattern_txt.findall(content))
@@ -104,19 +123,20 @@ def main():
         if os.path.exists('/usr/bin/tesseract'):
             pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
-        img_file = st.file_uploader("Wybierz plik ze zrzutem ekranu", type=['png', 'jpg', 'jpeg'])
+        img_file = st.file_uploader("Wybierz plik ze zrzutem ekranu",
+                                    type=['png', 'jpg', 'jpeg'], key="ocr_upload")
         if img_file is not None:
             img = Image.open(img_file)
             st.image(img, caption='Wgrany zrzut ekranu', use_container_width=True)
 
-            if st.button("Wyciągnij ID i generuj Regex z obrazka"):
+            if st.button("Wyciągnij ID i generuj Regex z obrazka", key="btn_ocr"):
                 with st.spinner('Analizowanie obrazu (OCR)...'):
                     try:
                         text = pytesseract.image_to_string(img, config='--psm 6')
-                        found = id_pattern_ocr.findall(text)
-                        if found:
-                            rx = build_regex(found)
-                            st.success(f"Znaleziono {len(set(found))} unikalnych ID!")
+                        ocr_ids = id_pattern_ocr.findall(text)
+                        if ocr_ids:
+                            rx = build_regex(ocr_ids)
+                            st.success(f"Znaleziono {len(set(ocr_ids))} unikalnych ID!")
                             st.caption("OCR bywa zawodny – sprawdź ID przed użyciem.")
                             st.code(rx, language='regex')
                             st.download_button("Pobierz jako regex_ocr.txt", rx,
@@ -128,17 +148,18 @@ def main():
                     except Exception as e:
                         st.error(f"Błąd OCR. Sprawdź instalację Tesseract. Szczegóły: {e}")
 
-        # --- TAB 3 ---
+    # --- TAB 3 ---
     with tab3:
         st.header("Ekstrakcja linków z wyszukiwarki")
         search_urls_in = st.text_area(
             "Podaj link(i) do wyników wyszukiwania (każdy w nowej linii, np. kolejne strony paginacji):",
             placeholder=("https://automatykab2b.pl/szukaj?q=askom\n"
                          "https://automatykab2b.pl/szukaj?q=askom&start=20"),
-            height=150)
+            height=150, key="search_urls")
         black = st.text_area(
             "Czarna lista (każda fraza w nowej linii):",
-            value="szybkie-i-latwe-planowanie-systemow\n/logowanie\n/rejestracja\n/kontakt\n/regulamin\n/polityka-prywatnosci")
+            value="szybkie-i-latwe-planowanie-systemow\n/logowanie\n/rejestracja\n/kontakt\n/regulamin\n/polityka-prywatnosci",
+            key="search_black")
 
         if st.button("Skanuj z wyszukiwarki", type="primary", key="btn_wyszukiwarka"):
             search_urls = list(dict.fromkeys(URL_RE.findall(search_urls_in)))
@@ -180,18 +201,20 @@ def main():
         st.header("Wyciąganie linków z podstron z filtrem kategorii")
         st.markdown("Wklej grupę adresów URL (oddzielonych spacją, enterem lub tekstem). "
                     "Skrypt wyciągnie tylko linki z cyframi.")
-        urls_in = st.text_area("Lista linków startowych:", height=150)
-        phrases_in = st.text_area(
+        irbj_urls_in = st.text_area("Lista linków startowych:", height=150,
+                                    key="irbj_urls")
+        irbj_phrases_in = st.text_area(
             "Szukane kategorie/frazy (każda w nowej linii, link musi zawierać min. jedną):",
-            value="irbj/porady\nirbj/nowosci\nirbj/aktualnosci\nirbj/filmy\nirbj/promocje")
+            value="irbj/porady\nirbj/nowosci\nirbj/aktualnosci\nirbj/filmy\nirbj/promocje",
+            key="irbj_phrases")
 
         if st.button("Skanuj podstrony", type="primary", key="btn_irbj"):
-            start_urls = list(dict.fromkeys(URL_RE.findall(urls_in)))
+            start_urls = list(dict.fromkeys(URL_RE.findall(irbj_urls_in)))
             if not start_urls:
                 st.warning("Nie znaleziono żadnych poprawnych linków startowych.")
             else:
-                phrases = [x.strip() for x in phrases_in.split('\n') if x.strip()]
-                found = set()
+                phrases = [x.strip() for x in irbj_phrases_in.split('\n') if x.strip()]
+                found_links = set()
                 bar = st.progress(0)
                 status = st.empty()
                 for i, url in enumerate(start_urls):
@@ -206,14 +229,14 @@ def main():
                                 continue
                             c = clean(p)
                             if any(x in c for x in phrases) and re.search(r'\d+', p.path):
-                                found.add(c)
+                                found_links.add(c)
                     bar.progress((i + 1) / len(start_urls))
                     time.sleep(0.3)
                 status.text("Skanowanie zakończone!")
 
-                if found:
-                    out = "\n".join(sorted(found))
-                    st.success(f"Gotowe. Unikalnych linków: {len(found)}")
+                if found_links:
+                    out = "\n".join(sorted(found_links))
+                    st.success(f"Gotowe. Unikalnych linków: {len(found_links)}")
                     st.code(out, language="text")
                     st.download_button("Pobierz listę", out, "podstrony_linki.txt",
                                        "text/plain", key="down_irbj")
@@ -225,11 +248,12 @@ def main():
         st.header("Wyciąganie fragmentów kategorii firm")
         st.markdown("Wklej link(i) do profilu firmy (np. `https://automatykab2b.pl/firmy/827-amtek`). "
                     "Zwracam fragment po `/firmy/` oddzielony znakiem `|`.")
-        urls_in = st.text_area("Linki do profilu firm:",
-                               placeholder="https://automatykab2b.pl/firmy/827-amtek\n...", height=100)
+        kat_urls_in = st.text_area("Linki do profilu firm:",
+                                   placeholder="https://automatykab2b.pl/firmy/827-amtek\n...",
+                                   height=100, key="kat_urls")
 
         if st.button("Wyciągnij kategorie", type="primary", key="btn_kategorie"):
-            start_urls = list(dict.fromkeys(URL_RE.findall(urls_in)))
+            start_urls = list(dict.fromkeys(URL_RE.findall(kat_urls_in)))
             if not start_urls:
                 st.warning("Proszę podać przynajmniej jeden link.")
             else:
