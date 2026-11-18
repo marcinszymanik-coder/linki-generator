@@ -9,7 +9,7 @@ import streamlit as st
 import pytesseract
 from PIL import Image
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse, unquote
 
 st.set_page_config(page_title="Generator Regex & Ekstraktor Linków", page_icon="🔍", layout="wide")
 
@@ -79,7 +79,12 @@ def fetch_soup(url: str):
 
 
 def clean(parsed):
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', '', ''))
+    """Czyści URL: usuwa parametry, kończący '/', dekoduje %20 i zamienia spacje na '-'."""
+    path = unquote(parsed.path).strip()
+    path = re.sub(r'\s+', '-', path)       # spacje (także po dekodowaniu %20) -> myślniki
+    path = re.sub(r'-{2,}', '-', path)     # wielokrotne myślniki -> jeden
+    path = path.rstrip('/')
+    return urlunparse((parsed.scheme, parsed.netloc, path, '', '', ''))
 
 
 def build_regex(ids):
