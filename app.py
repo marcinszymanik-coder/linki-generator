@@ -1,7 +1,10 @@
 import os
+import io
+import csv
 import re
 import time
 import socket
+import hashlib
 import ipaddress
 
 import requests
@@ -89,6 +92,16 @@ def clean(parsed):
 
 def build_regex(ids):
     return f".*/({'|'.join(sorted(set(ids), key=int))})-.*"
+
+
+def build_injection_csv(articles, target_url, keyword):
+    """CSV: Adres artykułu;Adres do linkowania;Słowo kluczowe"""
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=';', lineterminator='\r\n')
+    w.writerow(["Adres artykułu", "Adres do linkowania", "Słowo kluczowe"])
+    for a in articles:
+        w.writerow([a, target_url, keyword])
+    return buf.getvalue().encode("utf-8-sig")
 
 
 def main():
@@ -191,15 +204,59 @@ def main():
                     bar.progress((i + 1) / len(search_urls))
                     time.sleep(0.3)
                 status.text("Skanowanie zakończone!")
+                # zapis do sesji, żeby wynik przetrwał kolejne interakcje
+                st.session_state["search_links"] = sorted(links)
 
-                if links:
-                    out = "\n".join(sorted(links))
-                    st.success(f"Gotowe! Znaleziono {len(links)} unikalnych linków z {len(search_urls)} stron.")
-                    st.code(out, language="text")
-                    st.download_button("Pobierz listę", out, "wyszukiwarka_linki.txt",
-                                       "text/plain", key="down_wyszukiwarka")
-                else:
-                    st.warning("Nie znaleziono linków spełniających kryteria.")
+        links_sorted = st.session_state.get("search_links", [])
+        if links_sorted:
+            out = "\n".join(links_sorted)
+            st.success(f"Gotowe! Znaleziono {len(links_sorted)} unikalnych linków.")
+            with st.expander("Lista znalezionych linków"):
+                st.code(out, language="text")
+            st.download_button("Pobierz listę", out, "wyszukiwarka_linki.txt",
+                               "text/plain", key="down_wyszukiwarka")
+
+            # --- KROK 2: wstrzykiwanie linków ---
+            st.divider()
+            st.subheader("Krok 2: Przygotuj linkowanie (CSV)")
+            c1, c2 = st.columns(2)
+            keyword = c1.text_input("Fraza kluczowa (anchor):", placeholder="cokół",
+                                    key="inj_keyword")
+            target = c2.text_input("Link docelowy:",
+                                   placeholder="https://domena.pl/artykul-docelowy",
+                                   key="inj_target")
+
+            # klucz zależny od zawartości listy – nowy skan resetuje wybór
+            list_hash = hashlib.md5(out.encode("utf-8")).hexdigest()[:8]
+            selected = st.multiselect(
+                "Artykuły, w które wstrzykujemy link (domyślnie wszystkie):",
+                options=links_sorted, default=links_sorted,
+                key=f"inj_selected_{list_hash}")
+
+            target_clean = target.strip()
+            kw_clean = keyword.strip()
+            valid_target = bool(re.match(r'^https?://[^\s]+$', target_clean))
+
+            if target_clean and not valid_target:
+                st.warning("Link docelowy musi zaczynać się od http:// lub https://")
+
+            if kw_clean and valid_target and selected:
+                tnorm = target_clean.rstrip('/')
+                articles = [a for a in selected if a.rstrip('/') != tnorm]
+                skipped = len(selected) - len(articles)
+                if skipped:
+                    st.info("Pominięto link docelowy na liście źródeł (strona nie linkuje sama do siebie).")
+                csv_bytes = build_injection_csv(articles, target_clean, kw_clean)
+                st.caption(f"Wierszy w CSV: {len(articles)}")
+                st.dataframe(
+                    [{"Adres artykułu": a, "Adres do linkowania": target_clean,
+                      "Słowo kluczowe": kw_clean} for a in articles],
+                    use_container_width=True, height=250)
+                st.download_button("Pobierz CSV do wstrzykiwania", csv_bytes,
+                                   "adresy do wstrzykiwania.csv", "text/csv",
+                                   key="down_inj_csv", type="primary")
+            else:
+                st.caption("Uzupełnij frazę, poprawny link docelowy i wybierz co najmniej jeden artykuł.")
 
     # --- TAB 4 ---
     with tab4:
